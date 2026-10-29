@@ -134,6 +134,7 @@ Development history, simulation (Verilator) and test notes live in
 - MiSTer framework (`sys/`) by Sorgelig and contributors.
 - MiSTer port, Turbo/Turbo Z hardware, cassette and FM integration by
   Alan Steremberg.
+- JasonA.
 
 The root [LICENSE](LICENSE) is GPL-2.0. Inherited files keep their own
 notices, and some Nise X1 files carry non-commercial and redistribution
