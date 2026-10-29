@@ -1,0 +1,90 @@
+//-------------------------------------------------------------------------------------------------
+module cpu
+//-------------------------------------------------------------------------------------------------
+(
+	input  wire       reset_n,
+	input  wire       clock,
+	input  wire       cep,
+	input  wire       cen,
+	input  wire       int_n,
+	input  wire       wait_n,
+	// Active-low ownership seam for a future shared-bus DMA arbiter.
+	input  wire       busrq_n,
+	output wire       busak_n,
+	output wire       rfsh_n,
+	output wire       halt_n,
+	output wire       mreq,
+	output wire       iorq,
+	output wire       wr,
+	output wire       rd,	
+	output wire       m1,	
+	input  wire[ 7:0] di,
+	output wire[ 7:0] data_out,
+	output wire[15:0] a,
+	input wire [15:0] dir,
+	input wire dirset 
+);
+/*
+module tv80e (
+  // Outputs
+  m1_n, mreq_n, iorq_n, rd_n, wr_n, rfsh_n, halt_n, busak_n, A, dout,
+  // Inputs
+  reset_n, clk, cen, wait_n, int_n, nmi_n, busrq_n, di
+  );
+
+*/
+tv80e Z80CPU
+(
+	.clk 	 (clock	  ),
+	.cen 	 (cep	  ),
+	.reset_n (reset_n ),
+    .m1_n	 (m1	  ),	
+	.busrq_n (busrq_n  ),
+	.busak_n (busak_n  ),
+	.rfsh_n  (rfsh_n   ),
+	.wait_n	 (wait_n  ),
+	.halt_n	 (halt_n  ),
+	.mreq_n	 (mreq 	  ),
+	.iorq_n	 (iorq 	  ),
+	.nmi_n	 (1'b1 	  ),
+	.int_n	 (int_n	  ),
+    .rd_n	 (rd	  ),	
+	.wr_n	 (wr      ),
+	.A       (a       ),
+	.di		 (di      ),
+	.dout	 (data_out),
+	.dir 	 (dir	  ),
+	.dirset  (dirset  )
+);
+
+/*
+T80pa Cpu
+(
+	.CLK    (clock),
+	.CEN_p  (cep  ),
+	.CEN_n  (cen  ),
+	.RESET_n(reset),
+	.BUSRQ_n(1'b1 ),
+	.WAIT_n (1'b1 ),
+	.BUSAK_n(     ),
+	.HALT_n (     ),
+	.RFSH_n (     ),
+	.MREQ_n (mreq ),
+	.IORQ_n (iorq ),
+	.NMI_n  (1'b1 ),
+	.INT_n  (int_n),
+	.M1_n   (     ),
+	.RD_n   (     ),
+	.WR_n   (wr   ),
+	.A      (a    ),
+	.DI     (di   ),
+	.DO     (data_out),
+	.OUT0   (1'b0 ),
+	.REG    (     ),
+	.DIRSet (1'b0 ),
+	.DIR    (212'd0)
+);
+*/
+//-------------------------------------------------------------------------------------------------
+endmodule
+//-------------------------------------------------------------------------------------------------

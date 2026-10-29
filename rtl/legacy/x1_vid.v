@@ -1,0 +1,716 @@
+// X1TURBO is selected by the machine/build, never locally.
+`define BORDER_BLACK /* neecesary for VGA(analog RGB) */
+
+`define FAST_SQUE  /* 8dot left sque,save some circuit */
+
+/****************************************************************************
+	X1 VIDEO CIRCUIT
+
+	Version 050414
+
+	Copyright(C) 2004,2005 Tatsuyuki Satoh
+
+	This software is provided "AS IS", with NO WARRANTY.
+	NON-COMMERCIAL USE ONLY
+
+	Histry:
+		2008. 4.28 bugfix,can't PCG(X1mode) in WIDTH40 with X1turbo select
+		2005. 4.14 X1turbo mode PCG access address generator
+		           non left sque mode (coded only)
+		2005. 1.11 1st release
+
+	Note:
+
+	Distributing all and a part is prohibited. 
+	Because this version is developer-alpha version.
+
+    VIDEO / GRAPHIC RAM read is not supported
+
+****************************************************************************/
+module x1_vid #(parameter ENABLE_CRTC = 0, TURBO_SUPPORT = 0, TURBO_CLOCKS = 0, SEPARATE_VIDEO_RESET = 0, KANJI_RENDER = 0, SEPARATE_CRTC_BUS = 0, Z_KANJI_RENDER = 0, EXTERNAL_TEXT_PACKET = 0)(
+  I_VIDEO_RESET,
+  I_CRTC_BUS_CLK, I_CRTC_BUS_RS, I_CRTC_BUS_DATA, I_CRTC_BUS_WRITE,
+  I_TURBO_BLACK,
+  I_TURBO_HIGH_SCAN,
+  I_TURBO_TEXT_Y2,
+  I_TURBO_UNDERLINE,
+  I_RESET,
+// CPU I/F
+  I_CCLK,
+  I_A,
+  I_D,
+  O_D,
+  O_DE,
+  I_WR,
+  I_RD,
+  O_VWAIT,
+// CHIP SELECT
+  I_CRTC_CS,
+  I_CG_CS,
+  I_PAL_CS,
+  I_TXT_CS, I_ATT_CS, I_KAN_CS,
+  I_GRB_CS, I_GRR_CS, I_GRG_CS,
+// VIDEO CLOCK
+  I_VCLK,
+  I_CLK1,
+  O_VQ,
+// VIDEO MODE
+  I_W40,
+`ifdef X1TURBO
+  I_HIRESO,
+  I_LINE400,
+  I_TEXT12,
+  I_PCG_TURBO,
+  I_CG16,
+  I_UDLINE,
+  I_BLACK_COL,
+  I_TXT_BLACK,
+  I_GR0_BLACK,
+  I_GR1_BLACK,
+  I_BLK_BLACK,
+  O_YM,
+`endif
+// VRAM / GRAM
+  O_VA,
+  O_GRAPHICS_RA,
+  O_GRAPHICS_START, O_GRAPHICS_LOAD, O_CG_TRANSPARENT, O_GRAPHICS_DISP, O_CG_COLOR,
+// VRAM
+  O_TXT_WE, O_ATT_WE, O_KAN_WE,
+  I_TXT_D,  I_ATT_D,  I_KAN_D,
+// GRAM
+  O_GRB_WE, O_GRR_WE, O_GRG_WE,
+  I_GRB_D , I_GRR_D,  I_GRG_D,
+// CG ROM/RAM
+  O_CGA,
+  O_ANK16_ADDR,
+  O_KANJI_ADDR, O_KANJI_SELECT, O_KANJI_LEVEL1,
+  O_Z_KANJI_ADDR, O_Z_KANJI_SELECT, I_Z_KANJI_VALID, O_Z_KANJI_MISS, O_Z_KANJI_UNSUPPORTED,
+  I_TEXT_PACKET_VALID,
+  I_CG_D  , I_PCGB_D , I_PCGR_D , I_PCGG_D,
+// VIDEO OUTPUT
+  O_R     , O_G     , O_B,
+  O_HSYNC , O_VSYNC , O_VDISP,
+  O_HBLANK, O_VBLANK, O_CE_PIXEL
+);
+
+input I_RESET;
+input I_VIDEO_RESET;
+input I_CRTC_BUS_CLK, I_CRTC_BUS_RS, I_CRTC_BUS_WRITE;
+input [7:0] I_CRTC_BUS_DATA;
+wire video_reset_active = SEPARATE_VIDEO_RESET ? I_VIDEO_RESET : I_RESET;
+input [6:0] I_TURBO_BLACK;
+input I_TURBO_HIGH_SCAN;
+input I_TURBO_TEXT_Y2, I_TURBO_UNDERLINE;
+// CPU I/F
+input I_CCLK;
+input [15:0] I_A;
+input [7:0]  I_D;
+output [7:0] O_D;
+output O_DE;
+input I_WR;
+input I_RD;
+output O_VWAIT;
+// CS
+input I_CRTC_CS;
+input I_CG_CS;
+input I_PAL_CS;
+input I_TXT_CS;
+input I_ATT_CS;
+input I_KAN_CS;
+input I_GRB_CS , I_GRR_CS , I_GRG_CS;
+// VIDEO CLOCK
+input I_VCLK;
+input I_CLK1;
+output [4:0] O_VQ;
+input I_W40;
+
+`ifdef X1TURBO
+input I_HIRESO;
+input I_LINE400;
+input I_TEXT12;
+input I_PCG_TURBO;
+input I_CG16;
+input I_UDLINE;
+input [2:0] I_BLACK_COL;
+input I_TXT_BLACK;
+input I_GR0_BLACK;
+input I_GR1_BLACK;
+input I_BLK_BLACK;
+
+output O_YM;
+`endif
+
+// VRAM / GRAM
+// low  10bit for VRAM
+// full 13bit for GRAM
+output [13:0] O_VA;
+// Expose the full raster independently of the text/beam address. The active
+// machine applies Turbo GRAM paging without changing text or PCG selection.
+output [4:0] O_GRAPHICS_RA;
+// Original shared-machine extension: expose existing enables/layer inputs;
+// no replacement timing counter or generated clock is introduced.
+output O_GRAPHICS_START, O_GRAPHICS_LOAD, O_CG_TRANSPARENT, O_GRAPHICS_DISP;
+// Original extension: raw post-attribute glyph color before legacy mixing.
+output [2:0] O_CG_COLOR;
+
+// VRAM
+output      O_TXT_WE , O_ATT_WE , O_KAN_WE;
+input [7:0] I_TXT_D  , I_ATT_D  , I_KAN_D ;
+
+// GRAM
+output      O_GRB_WE , O_GRR_WE , O_GRG_WE;
+input [7:0] I_GRB_D  , I_GRR_D  , I_GRG_D ;
+
+// CG ROM/RAM
+output [10:0] O_CGA;
+output [11:0] O_ANK16_ADDR;
+output [16:0] O_KANJI_ADDR;
+output O_KANJI_SELECT, O_KANJI_LEVEL1;
+output [17:0] O_Z_KANJI_ADDR;
+output O_Z_KANJI_SELECT, O_Z_KANJI_MISS, O_Z_KANJI_UNSUPPORTED;
+input I_Z_KANJI_VALID;
+input I_TEXT_PACKET_VALID;
+input [7:0] I_CG_D  , I_PCGB_D , I_PCGR_D , I_PCGG_D;
+
+// VIDEO OUTPUT
+output O_R , O_G , O_B;
+output O_HSYNC;
+output O_VSYNC;
+output O_VDISP;
+output O_HBLANK, O_VBLANK, O_CE_PIXEL;
+/////////////////////////////////////////////////////////////////////////////
+// video timming generator
+/////////////////////////////////////////////////////////////////////////////
+wire [4:0] timing_phase;
+wire ppres = timing_phase[0];
+wire [3:0] pris = timing_phase[4:1];
+wire video_step;
+reg vid_reset;
+
+generate
+if (TURBO_CLOCKS) begin : turbo_timing
+  x1_video_timing timing (
+    .clk(I_VCLK), .reset(video_reset_active), .high_scan(I_TURBO_HIGH_SCAN),
+    .width40(I_W40), .step(video_step), .phase(timing_phase)
+  );
+end else begin : base_timing
+  reg base_prescale;
+  reg [3:0] base_divider;
+  assign timing_phase = {base_divider,base_prescale};
+  assign video_step = 1'b1;
+  always @(posedge I_VCLK or posedge video_reset_active) begin
+    if(video_reset_active) begin base_prescale <= 0; base_divider <= 0; end
+    else begin
+      base_prescale <= ~base_prescale & I_W40;
+      if(~base_prescale) base_divider <= base_divider + 1'b1;
+    end
+  end
+end
+endgenerate
+
+always @(posedge I_VCLK or posedge video_reset_active)
+begin
+  if(video_reset_active)
+  begin
+    vid_reset <= 1'b1;
+  end else begin
+    if(video_step && pris==4'b1111)
+      vid_reset <= 1'b0;
+  end
+end
+
+wire QP = ppres;
+wire QA = ~pris[0]; // 14.31818   : 21.47727
+wire QB = ~pris[1]; //  7.15909   : 10.738635
+wire QC = ~pris[2]; //  3.579545  :  5.3693175
+wire QD = ~pris[3]; //  1.7897725 :  2.68465875
+assign O_VQ = {QD,QC,QB,QA,QP};
+
+
+/****************************************************************************
+  CRTC
+****************************************************************************/
+wire [4:0]  crtc_ra;
+wire [13:0] crtc_ma;
+wire crtc_hsync;
+wire crtc_vsync;
+wire crtc_disptmg;
+
+crtc6845s #(.ENABLE_MODE(ENABLE_CRTC || TURBO_CLOCKS)) crtc6845s(
+  .I_E(SEPARATE_CRTC_BUS ? ~I_CRTC_BUS_CLK : ~I_CCLK),
+  .I_DI(SEPARATE_CRTC_BUS ? I_CRTC_BUS_DATA : I_D),
+  .I_RS(SEPARATE_CRTC_BUS ? I_CRTC_BUS_RS : I_A[0]),
+  .I_RWn(SEPARATE_CRTC_BUS ? ~I_CRTC_BUS_WRITE : ~I_WR),
+  .I_CSn(SEPARATE_CRTC_BUS ? ~I_CRTC_BUS_WRITE : ~I_CRTC_CS),
+  .I_CLK((ENABLE_CRTC || TURBO_CLOCKS) ? I_VCLK : ~QD),
+  .I_CE(video_step && ~ppres && pris == 4'b1111),
+  .I_RSTn(~vid_reset),
+  .O_RA(crtc_ra),
+  .O_MA(crtc_ma),
+  .O_H_SYNC(crtc_hsync),
+  .O_V_SYNC(crtc_vsync),
+  .O_DISPTMG(crtc_disptmg)
+);
+
+/****************************************************************************
+  VDISP signal
+****************************************************************************/
+//
+// 3xLS14 & RC delay(220ohm,1200pF)
+// about 300ns = 35ns(28.6Mhz) * 8.5
+//
+reg vdisp;
+reg vdisp_dly;
+reg [4:0] vdisp_ra;
+
+// Latch VDISP at the first character of every raster line (a new RA). The
+// inherited latch only sampled an even raster after an odd one: an odd R5
+// (Time Secret: R5=3) put an even adjust raster before row 0 and dropped
+// the first two display lines.
+always @(posedge I_VCLK)
+begin
+  if(crtc_ra != vdisp_ra) begin
+    vdisp_ra  <= crtc_ra;
+    vdisp_dly <= 1;
+  end else if(video_step & ~QP & QA & ~QD & ~QC & ~QB)
+  begin
+    if(vdisp_dly)
+      vdisp <= crtc_disptmg;
+    vdisp_dly <= 1'b0;
+  end
+end
+
+/****************************************************************************
+  VRAM/GRAM access address
+****************************************************************************/
+
+`ifdef X1TURBO
+// CRTC / turbo PCG address mux
+wire [10:0] vram_a = (I_PCG_TURBO && ~crtc_disptmg) ? 11'b11111111111 : crtc_ma;
+`else
+wire [10:0] vram_a = crtc_ma;
+`endif
+
+// CPU / VRAM address mux
+//assign O_VA = QD ? I_A[13:0] : {crtc_ra[2:0],vram_a};
+assign O_VA  = {crtc_ra[2:0],vram_a};
+assign O_GRAPHICS_RA = crtc_ra;
+
+/****************************************************************************
+  VRAM & CG LATCH
+****************************************************************************/
+reg [7:0] txt_d;
+reg [7:0] cgb_d , cgr_d , cgg_d;
+reg [7:0] grb_d , grr_d , grg_d;
+`ifdef FAST_SQUE
+wire [7:0] att_d = I_ATT_D; // attr bypass
+`else
+reg [7:0] att_d;
+reg [7:0] grb_r , grr_r , grg_r;
+`endif
+
+// attribute bit assign
+reg att_h2x;
+//reg att_v2x;
+reg att_pcg;
+reg att_blink;
+reg att_rev;
+reg att_g;
+reg att_r;
+reg att_b;
+// Z request/response attributes share one captured bundle. Ordinary load
+// wiring is unchanged; no new state exists in disabled generate branches.
+wire [7:0] z_attr_latched;
+wire [7:0] load_attribute = Z_KANJI_RENDER ? z_attr_latched : att_d;
+wire z_glyph_blank;
+wire text_packet_blank;
+generate if(EXTERNAL_TEXT_PACKET) begin : external_text_validity
+  reg blank;
+  always @(posedge I_VCLK or posedge video_reset_active)
+    if(video_reset_active) blank<=1;
+    else if(video_step & ~QP & QA & ~QD & ~QC & ~QB) blank<=!I_TEXT_PACKET_VALID;
+  assign text_packet_blank=blank;
+end else begin : ordinary_text_validity
+  assign text_packet_blank=1'b0;
+end endgenerate
+
+reg hsync_d , vsync_d , disp_d;
+
+// V2X
+reg [3:0] cg_line;
+reg old_ra0;
+reg pcg_paired;
+wire text_y2 = TURBO_SUPPORT && I_TURBO_TEXT_Y2;
+wire underline_mode = TURBO_SUPPORT && I_TURBO_UNDERLINE;
+wire [3:0] raster_font_row;
+wire raster_glyph_visible;
+wire [2:0] raster_reserved_color;
+reg glyph_visible_d;
+reg [2:0] reserved_color_d;
+x1_text_raster text_raster (
+  .high_scan(TURBO_SUPPORT && I_TURBO_HIGH_SCAN),
+  .text_y2(text_y2), .underline_mode(underline_mode),
+  .underline_cell(I_KAN_D[5]), .raster(crtc_ra),
+  .font_row(raster_font_row), .glyph_visible(raster_glyph_visible),
+  .reserved_color(raster_reserved_color)
+);
+wire font_ra0 = text_y2 ? crtc_ra[1] : crtc_ra[0];
+always @(posedge I_VCLK or posedge video_reset_active) begin
+  if(video_reset_active) begin glyph_visible_d <= 0; reserved_color_d <= 0; end
+  else if(video_step & ~QP & QA & ~QD & ~QC & ~QB) begin
+    glyph_visible_d <= raster_glyph_visible;
+    reserved_color_d <= raster_reserved_color;
+  end
+end
+
+always @(posedge I_VCLK)
+begin
+  if(video_step & ~QP & QA) // 1pixel enable
+  begin
+
+    // CG pixel shift
+    if(~att_h2x || ~QB)
+    begin
+      // pixel hift register
+      cgb_d[7:1] <= cgb_d[6:0];
+      cgr_d[7:1] <= cgr_d[6:0];
+      cgg_d[7:1] <= cgg_d[6:0];
+    end
+
+    // GRAM pixel shift
+    grb_d[7:1] <= grb_d[6:0];
+    grr_d[7:1] <= grr_d[6:0];
+    grg_d[7:1] <= grg_d[6:0];
+
+    if(~QD)
+    begin
+`ifdef FAST_SQUE
+      if( QC & ~QB) // delay 2 ealy latch
+      begin
+        txt_d <= I_TXT_D;
+        pcg_paired <= TURBO_SUPPORT && ((I_KAN_D & 8'h90) != 0);
+
+        // CG V pos
+        old_ra0 <= font_ra0;
+        if( (att_d[6] | ~crtc_disptmg) & vdisp )
+        begin
+          // V2X
+          if(old_ra0 & ~font_ra0)
+            cg_line <= cg_line + 1;    // x2 increment CRTC 2V
+        end else begin
+          cg_line <= raster_font_row;
+        end
+      end
+`endif
+      if(~QC & ~QB) // delay 4
+      begin
+`ifndef FAST_SQUE
+        // 1 char delayed latch
+        txt_d <= I_TXT_D;
+        att_d <= I_ATT_D;
+
+        // CG V pos
+        old_ra0 <= font_ra0;
+        if( (att_d[6] | ~crtc_disptmg) & vdisp )
+        begin
+          // V2X
+          if(old_ra0 & ~font_ra0)
+            cg_line <= cg_line + 1;        // x2 increment CRTC 2V
+        end else begin
+          cg_line <= raster_font_row;
+        end
+`endif
+        // CG load. Z Kanji cells carry their own glyph half per cell; ANK/PCG
+        // double width keeps the ordinary even-cell load and half-rate shift.
+        if((Z_KANJI_RENDER && O_Z_KANJI_SELECT) || ~att_h2x || ~crtc_ma[0])
+        begin
+          cgb_d  <= I_PCGB_D; // blue
+          cgr_d  <= I_PCGR_D; // reg
+          cgg_d  <= load_attribute[5] ? I_PCGG_D : I_CG_D; // green or ROM
+        end
+        // ATT load
+        att_h2x   <=  Z_KANJI_RENDER && O_Z_KANJI_UNSUPPORTED ? 1'b0 : load_attribute[7];
+`ifdef FAST_SQUE
+//        att_v2x   <=  att_d[6];
+`else
+//        att_v2x   <= (att_d[6] | ~crtc_disptmg) & vdisp;
+`endif
+        att_pcg   <=  load_attribute[5];
+        att_blink <=  load_attribute[4];
+        att_rev   <=  load_attribute[3];
+        att_g     <=  load_attribute[2];
+        att_r     <=  load_attribute[1];
+        att_b     <=  load_attribute[0];
+
+        // GRAM load
+`ifdef FAST_SQUE
+        grb_d <= I_GRB_D;
+        grr_d <= I_GRR_D;
+        grg_d <= I_GRG_D;
+        // syncs
+        hsync_d  <= crtc_hsync;
+        vsync_d  <= crtc_vsync;
+`else
+        grb_r <= I_GRB_D;
+        grr_r <= I_GRR_D;
+        grg_r <= I_GRG_D;
+        grb_d <= grb_r;
+        grr_d <= grr_r;
+        grg_d <= grg_r;
+        // syncs
+        hsync_d  <= crtc_hsync;
+        vsync_d  <= crtc_vsync;
+`endif
+        disp_d   <= crtc_disptmg;
+      end
+    end
+  end
+end
+
+/****************************************************************************
+  CG/PCG address
+****************************************************************************/
+
+/*
+  kanji
+
+wire kan_sel = kan_d[7]; // CG / KANJI
+wire kan_rt  = kan_d[7]; // LEFT / RIGHT
+wire kan_ul  = kan_d[7]; // under line
+wire kan_d2  = kan_d[7]; // DAI1 / DAI2,GAIJI
+wire [3:0] kan_ah = kan_d[3:0]; // upper address
+*/
+
+`ifdef X1TURBO
+wire x1t_cg_sel = I_PCG_TURBO & (crtc_hsync | hsync_d);
+assign O_CGA = { txt_d, x1t_cg_sel ? I_A[3:1] : cg_line[2:0] };
+`else
+wire high_glyph = TURBO_SUPPORT && I_TURBO_HIGH_SCAN;
+wire [7:0] pcg_character = high_glyph && pcg_paired ? {txt_d[7:1],cg_line[3]} : txt_d;
+wire [2:0] pcg_row = high_glyph && !pcg_paired ? cg_line[3:1] : cg_line[2:0];
+assign O_CGA = {pcg_character,pcg_row};
+`endif
+assign O_ANK16_ADDR = {txt_d,cg_line};
+
+// Original experimental extension, 2026. Electrical source/chip selection
+// follows CZ851_2C PDF3. Row policy follows X Millennium makechr/maketxtl:
+// standard scan uses even rows, high scan all rows. Not ASIC acceptance.
+generate if(TURBO_SUPPORT && KANJI_RENDER) begin : kanji_display
+  reg [7:0] kan_latched, attr_latched;
+  always @(posedge I_VCLK or posedge video_reset_active) begin
+    if(video_reset_active) begin kan_latched<=0;attr_latched<=0;end
+    else if(video_step & ~QP & QA & ~QD & QC & ~QB) begin
+      kan_latched<=I_KAN_D;
+      attr_latched<=I_ATT_D;
+    end
+  end
+  wire [3:0] kanji_row=I_TURBO_HIGH_SCAN ? cg_line : {cg_line[2:0],1'b0};
+  wire kace_n;
+  x1_kanji_decode decoder (
+    .decode_enable(!video_reset_active), .attribute(attr_latched),
+    .dkan(kan_latched), .dcha(txt_d), .raster(kanji_row),
+    .glyph_oe_n(), .kace_n(kace_n), .level1_select(O_KANJI_LEVEL1),
+    .level2_select(), .rom_address(), .rom_oe_n(), .byte_address(O_KANJI_ADDR)
+  );
+  assign O_KANJI_SELECT=!kace_n;
+end else begin : no_kanji_display
+  assign O_KANJI_ADDR=0;
+  assign O_KANJI_SELECT=0;
+  assign O_KANJI_LEVEL1=0;
+end endgenerate
+
+// Original opt-in Z physical-byte renderer. Functional normal-size,
+// high-resolution 25-line/16-raster policy from Techknow printed 139–141.
+// Exact KACE timing and other row/double-size policies remain unqualified.
+generate if(TURBO_SUPPORT && Z_KANJI_RENDER) begin : z_kanji_display
+  reg [7:0] character_latched, kan_latched, attr_latched;
+  reg [3:0] row_latched;
+  reg eligible_latched, miss=0;
+  reg glyph_blank=1;
+  // Mirror accepted video-domain CRTC writes. The CRTC register file itself
+  // retains warm reset, so these fields/validity do too. 16-raster layouts
+  // are admitted in either scan, 8-raster layouts in 15 kHz (every other line).
+  reg [4:0] crtc_index, maximum_raster;
+  reg raster_valid=0;
+  always @(posedge I_VCLK) begin
+    if(I_CRTC_BUS_WRITE) begin
+      if(!I_CRTC_BUS_RS) crtc_index<=I_CRTC_BUS_DATA[4:0];
+      else begin
+        if(crtc_index==5'd9) begin maximum_raster<=I_CRTC_BUS_DATA[4:0];raster_valid<=1;end
+      end
+    end
+  end
+  always @(posedge I_VCLK or posedge video_reset_active) begin
+    if(video_reset_active) begin
+      character_latched<=0;kan_latched<=0;attr_latched<=0;row_latched<=0;
+      eligible_latched<=0;miss<=0;glyph_blank<=1;
+    end else begin
+      if(video_step & ~QP & QA & ~QD & QC & ~QB) begin
+        character_latched<=I_TXT_D;
+        kan_latched<=I_KAN_D;
+        attr_latched<=I_ATT_D;
+        // 16-raster cells carry the whole 16x16 glyph in either scan
+        // (Koei Turbo titles use 15 kHz 80x12, R6=12/R9=15). 15 kHz 8-raster
+        // cells show every other glyph line, as the non-Z Kanji renderer does
+        // (Aoki Ookami's 640x200 prompt rows, R9=7).
+        row_latched<=maximum_raster==5'd7 ? {crtc_ra[2:0],1'b0} : crtc_ra[3:0];
+        eligible_latched<=!text_y2 && !underline_mode &&
+                          !I_ATT_D[7] && !I_ATT_D[6] && raster_valid &&
+                          (maximum_raster==5'd15 || (!I_TURBO_HIGH_SCAN && maximum_raster==5'd7));
+      end
+      if(video_step & ~QP & QA & ~QD & ~QC & ~QB) begin
+        // Align invalidity to glyph LOAD, not the earlier request. Apply its
+        // mask after reverse/blink so invalid bytes cannot become white ink.
+        glyph_blank<=O_Z_KANJI_SELECT && (!eligible_latched || !I_Z_KANJI_VALID);
+        if(O_Z_KANJI_SELECT && eligible_latched && !I_Z_KANJI_VALID) miss<=1;
+      end
+    end
+  end
+  assign z_attr_latched=attr_latched;
+  assign z_glyph_blank=glyph_blank;
+  assign O_Z_KANJI_ADDR={kan_latched[4],kan_latched[3:0],character_latched,row_latched,kan_latched[6]};
+  // Keep Kanji source identity even in an unsupported layout: blank rather
+  // than silently interpreting the selected character as ANK.
+  assign O_Z_KANJI_SELECT=!video_reset_active && !attr_latched[5] && kan_latched[7];
+  assign O_Z_KANJI_UNSUPPORTED=O_Z_KANJI_SELECT && !eligible_latched;
+  assign O_Z_KANJI_MISS=miss;
+end else begin : no_z_kanji_display
+  assign z_attr_latched=0;
+  assign z_glyph_blank=0;
+  assign O_Z_KANJI_ADDR=0;
+  assign O_Z_KANJI_SELECT=0;
+  assign O_Z_KANJI_MISS=0;
+  assign O_Z_KANJI_UNSUPPORTED=0;
+end endgenerate
+
+/****************************************************************************
+  CG attribute effect
+****************************************************************************/
+wire col_rev = att_rev^(att_blink & I_CLK1);
+
+wire cg_b = (att_pcg ? cgb_d[7] : cgg_d[7]) & att_b;
+wire cg_r = (att_pcg ? cgr_d[7] : cgg_d[7]) & att_r;
+wire cg_g = cgg_d[7] & att_g;
+
+// Reserved interline pixels cannot acquire reverse/blink glyph ink.
+wire [2:0] cg_col = z_glyph_blank || text_packet_blank || (underline_mode && !glyph_visible_d) ? 3'b000 :
+    {cg_g,cg_r,cg_b} ^ {col_rev,col_rev,col_rev};
+wire cg_trans = cg_col==3'b000;
+
+/****************************************************************************
+  GRAM palette / priority
+****************************************************************************/
+reg [7:0] PAL_B , PAL_R , PAL_G , PRIO_R;
+
+always @(posedge I_CCLK or posedge I_RESET)
+begin
+  if(I_RESET)
+  begin
+    PAL_B  <= 8'h00;
+    PAL_R  <= 8'h00;
+    PAL_G  <= 8'h00;
+    PRIO_R <= 8'h00;
+  end else begin
+    if(I_PAL_CS & I_WR)
+    begin
+      case(I_A[9:8])
+      2'b00: PAL_B  <= I_D;
+      2'b01: PAL_R  <= I_D;
+      2'b10: PAL_G  <= I_D;
+      2'b11: PRIO_R <= I_D;
+      endcase
+    end
+  end
+end
+
+// palette table
+wire [2:0] gr_col = !disp_d ? 3'b000 : underline_mode ? reserved_color_d :
+    {grg_d[7],grr_d[7],grb_d[7]};
+
+`ifdef BORDER_BLACK
+wire [2:0] gr_pal = disp_d ? {PAL_G[gr_col],PAL_R[gr_col],PAL_B[gr_col]} : 3'b000;
+`else
+wire [2:0] gr_pal = {PAL_G[gr_col],PAL_R[gr_col],PAL_B[gr_col]};
+`endif
+wire gr_sel = PRIO_R[gr_col] | cg_trans | ~disp_d;
+// Original active-path Turbo blackclip integration. Kanji remains separate.
+wire turbo_gr_black = (gr_col[2:1] == 0) &&
+    ((I_TURBO_BLACK[4] && !gr_col[0]) || (I_TURBO_BLACK[5] && gr_col[0]));
+wire turbo_cg_black = I_TURBO_BLACK[3] && cg_col == I_TURBO_BLACK[2:0];
+wire turbo_mx_black = TURBO_SUPPORT &&
+    (!disp_d ? I_TURBO_BLACK[6] : gr_sel ? turbo_gr_black : turbo_cg_black);
+
+// BLACK controll
+`ifdef X1TURBO
+wire gr_black = (gr_col[2:1]==2'b00) & ((I_GR0_BLACK & ~gr_col[0]) | (I_GR1_BLACK & gr_col[0]));
+wire cg_black = I_TXT_BLACK & (cg_col==I_BLACK_COL);
+wire mx_black = ~disp_d ? I_BLK_BLACK : gr_sel ? gr_black : cg_black;
+`endif
+
+/****************************************************************************
+  video output mixer
+****************************************************************************/
+// VGA output mixer
+//                   RIGHT SIDE: text 
+//                   COLOR VER : area
+
+`ifdef X1TURBO
+reg ym_r;
+`endif
+
+reg [2:0] out_col;
+// RGB is registered one master edge after the shifter/attribute decision.
+// Delay active-display qualification by the same edge; otherwise the first
+// captured/displayed pixel belongs to the preceding blank character.
+reg out_disp;
+always @(posedge I_VCLK)
+begin
+  if(video_reset_active) out_disp <= 0;
+  else out_disp <= disp_d;
+`ifdef X1TURBO
+  ym_r    <= mx_black;
+  out_col <= mx_black ? 3'b000 : gr_sel ? gr_pal : cg_col;
+`else
+  out_col <= turbo_mx_black ? 3'b000 : gr_sel ? gr_pal : cg_col;
+`endif
+end
+
+assign O_B = out_col[0];
+assign O_R = out_col[1];
+assign O_G = out_col[2];
+`ifdef X1TURBO
+assign O_YM = ym_r;
+`endif
+
+`ifdef FAST_SQUE
+assign O_HSYNC = crtc_hsync;
+assign O_VSYNC = crtc_vsync;
+`else
+assign O_HSYNC = hsync_d;
+assign O_VSYNC = vsync_d;
+`endif
+assign O_VDISP = vdisp;
+assign O_HBLANK = ~out_disp;
+assign O_VBLANK = ~vdisp;
+assign O_CE_PIXEL = video_step & ~QP & QA;
+assign O_GRAPHICS_START = video_step && !ppres && pris==0;
+assign O_GRAPHICS_LOAD = video_step & ~QP & QA & ~QD & ~QC & ~QB;
+assign O_CG_TRANSPARENT = cg_trans;
+assign O_CG_COLOR = cg_col;
+assign O_GRAPHICS_DISP = disp_d;
+
+/****************************************************************************
+  CPU read data
+****************************************************************************/
+assign O_D  = 8'h00;
+assign O_DE = 1'b0;
+assign O_VWAIT = 1'b0; //!!!!!
+
+assign O_TXT_WE = 1'b0;
+assign O_ATT_WE = 1'b0;
+assign O_KAN_WE = 1'b0;
+assign O_GRB_WE = 1'b0;
+assign O_GRR_WE = 1'b0;
+assign O_GRG_WE = 1'b0;
+
+endmodule
