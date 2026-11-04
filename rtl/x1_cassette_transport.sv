@@ -10,9 +10,22 @@
 // APSS forward (5) / back (6) wind the same way but read every sample on the
 // way (the producer keeps fetching, a step waits for a valid sample) and stop
 // in the first gap after sound: about 1.8 s of tape without a level change,
-// where CSP's 2-s window turns 90% one level. As in CSP the window spans
-// the samples PLAY read before the command, so APSS sent right after a file
-// stops in the gap behind it (Z Gundam); FF/REW forget it.
+// where CSP's 2-s window turns 90% one level. A gap counts only after at
+// least 1 s of continuous sound before it in the winding direction (a pause
+// of 0.25 s or more ends a stretch). APSS forward keeps the sound PLAY just
+// read, so APSS sent right after a file stops in the gap behind it
+// (Z Gundam). APSS back counts afresh: the sound behind the head is the
+// stretch it winds back over, so APSS back sent just after reading a header
+// (under 1 s of sound) passes that file's own gap and stops before the
+// previous file. Macadam steps back one file per APSS this way (it asks for
+// file 2 after reading header 4); CSP stops in the nearest gap and loops.
+// FF/REW forget the sound.
+// APSS runs to completion before the next command: a command other than EJECT
+// that arrives while APSS winds is held (the newest wins) and applied when the
+// search stops. Macadam sends PLAY 0.4 ms after APSS back (its header read
+// starts with sense + PLAY) and relies on the deck finishing the search
+// first, as CSP's do_apss does inside the command; applied at once, PLAY
+// cancelled the search and the game read on past file 2 forever.
 // Sensor bits 0/1 provisionally mean not-ended/inserted; upper mask unresolved.
 `timescale 1ns/1ps
 module x1_cassette_transport #(
@@ -69,8 +82,16 @@ module x1_cassette_transport #(
             assign wind_due = wind_sum >= (PHASE_W+5)'(SYS_HZ);
         end
     endgenerate
-    wire supported_cmd = cmd_valid && cmd <= APSS_R;
     wire apss = applied_mode == APSS_F || applied_mode == APSS_R;
+    // Commands held while APSS winds (see above); replayed once it stops.
+    logic pending;
+    logic [7:0] pending_cmd;
+    wire defer = cmd_valid && cmd != EJECT && cmd <= APSS_R && apss && mounted &&
+        !mount && !reset;
+    wire replay = pending && !apss;
+    wire eff_valid = (cmd_valid && !defer) || replay;
+    wire [7:0] eff_cmd = cmd_valid ? cmd : pending_cmd;
+    wire supported_cmd = eff_valid && eff_cmd <= APSS_R;
     wire moving = winding || apss;
     // APSS gap detector, counted in tape samples.
     wire [19:0] rate_hz = RUNTIME_RATE ? sample_hz : 20'(SAMPLE_HZ);
@@ -78,9 +99,18 @@ module x1_cassette_transport #(
         {6'd0, rate_hz[19:2]} + {8'd0, rate_hz[19:4]} + 24'd1; // 1.8125 s
     // quiet: samples read (PLAY or APSS) since the last level change.
     logic [23:0] quiet;
-    logic heard, apss_level, level_known;
-    wire apss_gap = heard && quiet >= gap_samples;
+    // run: samples in the current sound stretch; armed once it reaches 1 s.
+    logic [19:0] run;
+    logic armed, apss_level, level_known;
+    wire apss_gap = armed && quiet >= gap_samples;
     wire level_change = level_known && sample_level != apss_level;
+    wire [23:0] quiet_next = level_change ? 24'd1 : quiet != '1 ? quiet + 1'b1 : quiet;
+    wire [19:0] run_next = run + 1'b1;
+    // Constant only for the rejected zero rate (fatal below).
+    /* verilator lint_off UNSIGNED */
+    wire sound_next = quiet_next < {6'd0, rate_hz[19:2]}; // 0.25 s
+    wire run_full = run_next >= rate_hz; // 1 s of sound
+    /* verilator lint_on UNSIGNED */
     // Eject wins mount, then mount, warm reset, supported commands, playback.
     // Unsupported commands are ignored without stalling natural playback.
     assign sample_ready = !reset && !mount && !supported_cmd &&
@@ -94,41 +124,48 @@ module x1_cassette_transport #(
     assign sensor = !mounted ? 8'h00 : ended ? 8'h02 : 8'h03;
     initial begin
         applied_mode = EJECT; underflow = 0; refill = 0;
-        quiet = '1; heard = 0; apss_level = 0; level_known = 0;
+        quiet = '1; armed = 0; run = 0; apss_level = 0; level_known = 0;
         mounted = 0; ended = 0; have_sample = 0;
         held_level = 0; held_last = 0; phase = 0;
+        pending = 0; pending_cmd = 0;
     end
+    always @(posedge clk_sys)
+        if (mount || reset || (cmd_valid && cmd == EJECT) || (cmd_valid && !defer) || replay)
+            pending <= defer; // a direct command or the replay consumes it
+        else if (defer) pending <= 1;
+    always @(posedge clk_sys) if (defer) pending_cmd <= cmd;
     generate
         if (SAMPLE_HZ == 0 || SYS_HZ < 2 || SAMPLE_HZ > SYS_HZ) begin : invalid_rate
             initial $fatal(1, "unsupported cassette sample/system rate");
         end
     endgenerate
     always @(posedge clk_sys) begin
-        if (cmd_valid && cmd == EJECT) begin
+        if (eff_valid && eff_cmd == EJECT) begin
             mounted <= 0; ended <= 0; have_sample <= 0;
             held_level <= 0; held_last <= 0; phase <= 0;
             applied_mode <= EJECT; underflow <= 0; refill <= 0;
-            quiet <= '1; level_known <= 0;
+            quiet <= '1; level_known <= 0; armed <= 0; run <= 0;
         end else if (mount) begin
             mounted <= present; ended <= present && empty;
             have_sample <= 0; held_level <= 0; held_last <= 0;
             phase <= 0; underflow <= 0; refill <= 0;
             applied_mode <= present ? STOP : EJECT;
-            quiet <= '1; level_known <= 0;
+            quiet <= '1; level_known <= 0; armed <= 0; run <= 0;
         end else if (reset) begin
             // Retain media, cursor represented by accepted stream, phase/sample.
             applied_mode <= mounted ? STOP : EJECT;
         end else if (supported_cmd) begin
-            if (cmd == STOP && mounted) applied_mode <= STOP;
-            if (cmd == PLAY && mounted && !ended) applied_mode <= PLAY;
-            if (cmd >= FF && mounted) begin
+            if (eff_cmd == STOP && mounted) applied_mode <= STOP;
+            if (eff_cmd == PLAY && mounted && !ended) applied_mode <= PLAY;
+            if (eff_cmd >= FF && mounted) begin
                 // The held sample is dropped; PLAY refills from the cursor.
-                applied_mode <= cmd; have_sample <= 0; held_last <= 0;
+                applied_mode <= eff_cmd; have_sample <= 0; held_last <= 0;
                 phase <= 0; underflow <= 0; refill <= 1;
-                // APSS keeps the sound PLAY just read; FF/REW forget it.
-                heard <= (cmd == APSS_F || cmd == APSS_R) && level_known &&
-                    quiet < gap_samples;
-                if (cmd == FF || cmd == REW) begin
+                // APSS forward keeps the sound PLAY just read; APSS back
+                // and FF/REW count afresh.
+                armed <= eff_cmd == APSS_F && armed && level_known && quiet < gap_samples;
+                if (eff_cmd != APSS_F) run <= 0;
+                if (eff_cmd == FF || eff_cmd == REW) begin
                     quiet <= '1; level_known <= 0;
                 end
             end
@@ -138,15 +175,17 @@ module x1_cassette_transport #(
             if (wind_back ? at_start : at_end) begin
                 applied_mode <= STOP; ended <= !wind_back;
             end else if (apss && apss_gap) begin
-                applied_mode <= STOP;
+                applied_mode <= STOP; armed <= 0;
             end else if (wind_due && !(apss && !sample_valid)) begin
                 phase <= PHASE_W'(wind_sum - (PHASE_W+5)'(SYS_HZ));
                 if (wind_back) ended <= 0;
                 if (apss) begin
                     apss_level <= sample_level; level_known <= 1;
-                    if (level_change) begin
-                        quiet <= 1; heard <= 1;
-                    end else if (quiet != '1) quiet <= quiet + 1'b1;
+                    quiet <= quiet_next;
+                    if (!sound_next) run <= 0;
+                    else if (!armed) begin
+                        run <= run_next; if (run_full) armed <= 1;
+                    end
                 end
             end else if (!(apss && !sample_valid)) phase <= PHASE_W'(wind_sum);
         end else if (applied_mode == PLAY && mounted && !ended) begin
@@ -155,7 +194,12 @@ module x1_cassette_transport #(
                     held_level <= sample_level; held_last <= sample_last;
                     have_sample <= 1; refill <= 0;
                     apss_level <= sample_level; level_known <= 1;
-                    quiet <= level_change ? 24'd1 : quiet != '1 ? quiet + 1'b1 : quiet;
+                    quiet <= quiet_next;
+                    if (!sound_next) run <= 0;
+                    else if (!armed) begin
+                        run <= run_next; if (run_full) armed <= 1;
+                    end
+                    if (quiet_next >= gap_samples) armed <= 0;
                 end else if (refill && at_end) begin
                     ended <= 1; applied_mode <= STOP;
                 end else if (!refill) begin
@@ -168,7 +212,12 @@ module x1_cassette_transport #(
                 end else if (sample_valid) begin
                     held_level <= sample_level; held_last <= sample_last;
                     apss_level <= sample_level; level_known <= 1;
-                    quiet <= level_change ? 24'd1 : quiet != '1 ? quiet + 1'b1 : quiet;
+                    quiet <= quiet_next;
+                    if (!sound_next) run <= 0;
+                    else if (!armed) begin
+                        run <= run_next; if (run_full) armed <= 1;
+                    end
+                    if (quiet_next >= gap_samples) armed <= 0;
                 end else begin
                     // Boundary missed: do NOT stretch current waveform or fake EOF.
                     have_sample <= 0; underflow <= 1;
